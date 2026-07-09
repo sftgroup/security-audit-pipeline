@@ -104,28 +104,33 @@ CONTRACT_TOOLS = [
     ),
     types.Tool(
         name="mythril_analyze",
-        description="Run Mythril symbolic execution on a contract",
+        description="Run Mythril symbolic execution on a contract. Agent MUST pass build_system to avoid auto-detection failures.",
         inputSchema={
             "type": "object",
             "properties": {
                 "project_path": {"type": "string", "description": "Path to contract project"},
-                "target_contract": {"type": "string", "description": "Target .sol file path relative to project"}
+                "target_contract": {"type": "string", "description": "Target .sol file path relative to project"},
+                "build_system": {"type": "string", "enum": ["hardhat", "forge"], "description": "Build system (REQUIRED — agent must determine from project structure)"},
+                "solc_version": {"type": "string", "description": "Solidity compiler version (e.g. 0.8.19)"},
+                "execution_timeout": {"type": "integer", "description": "Symbolic execution timeout in seconds (default: 120)"}
             },
-            "required": ["project_path"]
+            "required": ["project_path", "build_system"]
         }
     ),
     types.Tool(
         name="echidna_fuzz",
-        description="Run Echidna fuzzing with a harness",
+        description="Run Echidna fuzzing with a harness. Agent MUST explicitly pass harness_path and contract_name — no auto-detection inside tool.",
         inputSchema={
             "type": "object",
             "properties": {
                 "project_path": {"type": "string", "description": "Path to contract project"},
-                "harness_path": {"type": "string", "description": "Path to .sol harness file"},
-                "contract_name": {"type": "string", "description": "Contract name in harness"},
-                "test_limit": {"type": "integer", "description": "Max test sequences (default: 100000)"}
+                "harness_path": {"type": "string", "description": "Path to .sol harness file (REQUIRED — agent must read project and confirm this file exists)"},
+                "contract_name": {"type": "string", "description": "Contract name in harness (REQUIRED — agent must read harness to confirm)"},
+                "test_limit": {"type": "integer", "description": "Max test sequences (default: 100000)"},
+                "rpc_url": {"type": "string", "description": "RPC URL for fork-based fuzzing (optional)"},
+                "block_number": {"type": "integer", "description": "Block number for fork testing (optional)"}
             },
-            "required": ["project_path"]
+            "required": ["project_path", "harness_path", "contract_name"]
         }
     ),
     types.Tool(
@@ -437,17 +442,28 @@ async def _aderyn_scan(args: dict) -> dict:
 
 async def _mythril_analyze(args: dict) -> dict:
     project = args["project_path"]
-    target = args.get("target_contract", "src/")
+    target = args.get("target_contract", "")
+    build_system = args["build_system"]  # REQUIRED by inputSchema
+    exec_timeout = str(args.get("execution_timeout", 120))
+    solc_version = args.get("solc_version", "")
+
+    # Build correct target path — agent already decided, tool just executes
+    if not target:
+        target = "contracts/" if build_system == "hardhat" else "src/"
+
+    cmd = ["myth", "analyze", target, "--execution-timeout", exec_timeout]
+    if solc_version:
+        cmd += ["--solv", solc_version]
+
     try:
-        r = run(
-            ["myth", "analyze", target, "--execution-timeout", "120"],
-            cwd=project, capture_output=True, text=True, timeout=300
-        )
+        r = run(cmd, cwd=project, capture_output=True, text=True, timeout=300)
         # Parse mythril output for SWC IDs
         swc_ids = re.findall(r'SWC-(\d+)', r.stdout)
         issues = re.findall(r'(High|Medium|Low)', r.stdout)
         return {
             "tool": "mythril",
+            "build_system": build_system,
+            "target": target,
             "swc_ids": list(set(swc_ids)),
             "high": issues.count("High"),
             "medium": issues.count("Medium"),
@@ -461,23 +477,29 @@ async def _mythril_analyze(args: dict) -> dict:
 
 async def _echidna_fuzz(args: dict) -> dict:
     project = find_contract_dir(args["project_path"])
-    harness = args.get("harness_path", "")
-    contract = args.get("contract_name", "")
+    harness = args["harness_path"]           # NOW REQUIRED — inputSchema enforces
+    contract = args["contract_name"]         # NOW REQUIRED — inputSchema enforces
     limit = str(args.get("test_limit", 100000))
-    if not harness or not contract:
-        return {"tool": "echidna", "skipped": True, "reason": "harness_path and contract_name required for echidna fuzzing"}
+    rpc_url = args.get("rpc_url", "")
+    block_number = args.get("block_number", "")
+
+    cmd = ["echidna-test", harness, "--contract", contract, "--test-limit", limit]
+    if rpc_url:
+        cmd += ["--rpc-url", rpc_url]
+    if block_number:
+        cmd += ["--block-number", str(block_number)]
+
     try:
-        r = run(
-            ["echidna-test", harness, "--contract", contract, "--test-limit", limit],
-            cwd=project, capture_output=True, text=True, timeout=600
-        )
+        r = run(cmd, cwd=project, capture_output=True, text=True, timeout=600)
         # Parse results
         passed = re.findall(r'\[PASSED\]', r.stdout)
         failed = re.findall(r'\[FAILED\]', r.stdout)
         return {
             "tool": "echidna",
             "contract": contract,
+            "harness": harness,
             "test_limit": limit,
+            "fork_mode": bool(rpc_url),
             "passed": len(passed),
             "failed": len(failed),
             "output_tail": r.stdout[-3000:] if r.stdout else r.stderr[-2000:]
