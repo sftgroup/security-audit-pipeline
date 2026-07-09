@@ -113,34 +113,35 @@ cp /tmp/agent-skills/agents/security-check-centralized/AGENTS.md ~/.openclaw/wor
       {
         "id": "security-check",
         "workspace": "workspace/security-check",
-        "description": "合约安全扫描"
+        "description": "合约安全扫描",
+        "model": "deepseek/deepseek-v4-pro"
       },
       {
         "id": "security-check-centralized",
         "workspace": "workspace/security-check-centralized",
-        "description": "中心化项目扫描"
-      },
-      {
-        "id": "qa",
-        "workspace": "workspace/qa",
-        "description": "L1+L2 代码审查"
+        "description": "中心化项目扫描",
+        "model": "deepseek/deepseek-v4-pro"
       }
     ]
   }
 }
 ```
 
-> ⚠️ **安全审计（security）必须用 `zhipu/glm-5.2`** — SCSVS 85 项深度审计需要 128K context，deepseek-v4-pro (32K) 会截断。
+> ⚠️ **模型要求**：
+> - `security` 必须 `zhipu/glm-5.2`（128K context），SCSVS 85 项深度审计 deepseek-v4-pro (32K) 会截断
+> - `security-check` / `security-check-centralized` 用 `deepseek/deepseek-v4-pro`（扫描汇总不超 32K）
 
-### 3.3 定制 AGENTS.md（按项目类型）
+> ℹ️ **qa 子代理不在此 Skill 范围内** — qa 是功能代码审查，走独立的 `code-review` MCP (9001)。如果你需要，从 sftgroup/agent 仓库单独取 qa/AGENTS.md。
 
-| 项目类型 | 需要 spawn | 用到哪些 MCP 工具 |
-|----------|-----------|-------------------|
-| 纯合约 | qa + security + security-check | security-tools__contract_audit() + code-review__review_all() |
-| 纯中心化 | qa + centralized | security-tools__centralized_audit() + code-review__review_all() |
-| 混合 | 全部 | 上面两种都要 |
+### 3.3 路线选择（按项目类型）
 
-打开 AGENTS.md → 删掉不需要的项目类型说明 → 5 分钟搞定。
+| 项目类型 | 必须 spawn（安全） | 可选 spawn |
+|----------|-------------------|-----------|
+| 含合约 | security + security-check | qa（功能审查） |
+| 纯中心化 | security-check-centralized | qa（功能审查） |
+| 混合 | security + security-check + centralized | qa（功能审查） |
+
+打开 AGENTS.md → 删掉不需要的项目类型说明。
 
 ---
 
@@ -149,19 +150,18 @@ cp /tmp/agent-skills/agents/security-check-centralized/AGENTS.md ~/.openclaw/wor
 在你的主 agent（team2 / team4 / team5 等）的 AGENTS.md 中加入：
 
 ```markdown
-### 5.1 子代理 MCP 调用速查
+### 安全子代理 MCP 调用速查
 
-| 子代理 | 核心 MCP 入口 |
-|--------|--------------|
-| qa | `code-review__review_all()` / `code-review__report()` |
-| security | `security-tools__contract_audit()` / `security-tools__query_intelligence()` |
-| security-check | `security-tools__contract_audit()` |
-| centralized | `security-tools__centralized_audit()` / `security-tools__production_audit()` |
+| 子代理 | 核心 MCP 入口 | 模型 |
+|--------|--------------|------|
+| security | `security-tools__contract_audit()` / `security-tools__query_intelligence()` | zhipu/glm-5.2 |
+| security-check | `security-tools__contract_audit()` | deepseek-v4-pro |
+| centralized | `security-tools__centralized_audit()` / `security-tools__production_audit()` | deepseek-v4-pro |
 
-### 审计流程
+### 审计流程（安全专用）
 
 ① 判断项目类型 → rsync 到 MCP 服务器 `/opt/mcp/repos/{team}`
-② 并行 spawn qa + security + security-check + centralized
+② 并行 spawn 对应安全子代理
 ③ 子代理调 MCP 原生工具 → 分批 write 报告
 ④ 架构师汇总 → 修 Critical+High → 汇报
 ```
@@ -200,34 +200,28 @@ security-tools__contract_audit({"project_path":"/opt/mcp/repos/team2","scope":"s
 # 应返回 build + test + slither 的摘要
 ```
 
-### 完整审计（spawn 子代理）
+### 完整审计（spawn 安全子代理）
 
 ```bash
-# 并行 spawn 4 个子代理
-sessions_spawn security "对项目执行深度安全审计:
-- 项目: /opt/mcp/repos/team2
-- security-tools__contract_audit(project_path='/opt/mcp/repos/team2', scope='full')
-- security-tools__query_intelligence(category='defi')
-- 威胁建模 + 钱流分析 + SCSVS 85项
-- 产出: /opt/mcp/repos/team2/test-reports/SECURITY_REVIEW_REPORT.md"
+# 并行 spawn 3 个安全子代理
+sessions_spawn security "
+security-tools__contract_audit(project_path='/opt/mcp/repos/{team}', scope='full')
+security-tools__query_intelligence(category='defi')
+威胁建模 + 钱流分析 + SCSVS 85项
+产出: SECURITY_REVIEW_REPORT.md"
 
-sessions_spawn security-check "对项目执行合约扫描:
-- security-tools__contract_audit(project_path='/opt/mcp/repos/team2', scope='full')
-- SCSVS 映射 + Immunefi 对标
-- 产出: /opt/mcp/repos/team2/test-reports/SECURITY_SCAN_REPORT.md"
+sessions_spawn security-check "
+security-tools__contract_audit(project_path='/opt/mcp/repos/{team}', scope='full')
+SCSVS 映射 + Immunefi 对标
+产出: SECURITY_SCAN_REPORT.md"
 
-sessions_spawn qa "对项目执行代码审查:
-- code-review__review_all(project_path='/opt/mcp/repos/team2', language='all')
-- L1+L2+L3 代码审查
-- 产出: /opt/mcp/repos/team2/test-reports/QA_REVIEW_REPORT.md"
-
-sessions_spawn security-check-centralized "对项目执行中心化扫描:
-- security-tools__centralized_audit(project_path='/opt/mcp/repos/team2', scope='all', language='auto')
-- OWASP 映射
-- 产出: /opt/mcp/repos/team2/test-reports/SECURITY_SCAN_REPORT_CENTRALIZED.md"
+sessions_spawn security-check-centralized "
+security-tools__centralized_audit(project_path='/opt/mcp/repos/{team}', scope='all', language='auto')
+OWASP 映射
+产出: SECURITY_SCAN_REPORT_CENTRALIZED.md"
 ```
 
-全部完成后，架构师汇总 4 份报告 → 修 Critical+High → 部署 → 回归测试 → 汇报。
+全部完成后，架构师汇总 3 份报告 → 修 Critical+High → 部署 → 回归测试 → 汇报。
 
 ---
 
@@ -259,20 +253,18 @@ sessions_spawn security-check-centralized "对项目执行中心化扫描:
 | MCP 返回 "tool not found" | 工具名没加前缀 | 必须是 `security-tools__contract_audit`，不能写成 `contract_audit` |
 | forge build 失败 | 项目没 rsync 或 foundry.toml 不在根目录 | 确认 rsync 后再试 |
 | slither/aderyn/mythril 结果为空 | MCP 服务器上工具未安装 | 参考 `references/tool-install.md` 安装 |
-| QA 报告只有 L0 没 L1/L2 | QA 子代理只调了 code-review 没读源码 | AGENTS.md 里强调必须先 L0 再 L1/L2 |
+| security 子代理输出被截断 | 用了 deepseek-v4-pro (32K) | 改为 `"model": "zhipu/glm-5.2"` |
 | 子代理用了 `exec curl` 而不是 MCP 工具 | AGENTS.md 里还有旧版 curl 指令 | 检查 AGENTS.md 没有 `exec curl` 字样 |
 
 ---
 
-## 完整审计交付物
+## 完整审计交付物（安全侧）
 
-| 报告 | 产出路径 | 审查者 |
-|------|---------|--------|
-| E2E_TEST_REPORT.md | test-reports/ | tester |
-| QA_REVIEW_REPORT.md | test-reports/ | qa |
-| SECURITY_REVIEW_REPORT.md | test-reports/ | security (GLM-5.2) |
-| SECURITY_SCAN_REPORT.md | test-reports/ | security-check |
-| SECURITY_SCAN_REPORT_CENTRALIZED.md | test-reports/ | security-check-centralized |
+| 报告 | 产出路径 | 子代理 | 模型 |
+|------|---------|--------|------|
+| SECURITY_REVIEW_REPORT.md | test-reports/ | security | GLM-5.2 |
+| SECURITY_SCAN_REPORT.md | test-reports/ | security-check | deepseek-v4-pro |
+| SECURITY_SCAN_REPORT_CENTRALIZED.md | test-reports/ | security-check-centralized | deepseek-v4-pro |
 
 ---
 

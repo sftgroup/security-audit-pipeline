@@ -8,6 +8,49 @@ import json
 import re
 import os
 
+# Build a PATH-enhanced environment for subprocess calls
+# systemd Environment= may not propagate to subprocess children
+_FULL_PATH = os.pathsep.join([
+    os.path.expanduser("~/.foundry/bin"),
+    os.path.expanduser("~/go/bin"),
+    os.path.expanduser("~/.local/bin"),
+    os.path.expanduser("~/.cyfrin/bin"),
+    "/usr/local/go/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+])
+_ENV = dict(os.environ)
+_ENV["PATH"] = _FULL_PATH
+
+
+def run(cmd, **kwargs):
+    """Run a command with full PATH, returning CompletedProcess."""
+    kwargs.setdefault("capture_output", True)
+    kwargs.setdefault("text", True)
+    kwargs.setdefault("timeout", 120)
+    kwargs.setdefault("env", _ENV)
+    return subprocess.run(cmd, **kwargs)
+
+
+# ============================================================
+# Path helpers
+# ============================================================
+
+def find_contract_dir(project_path: str) -> str:
+    """Auto-detect Foundry/Hardhat project directory.
+    
+    If project_path itself contains foundry.toml, return it.
+    Otherwise search subdirectories (contracts/, hardhat/, solidity/).
+    """
+    if os.path.exists(os.path.join(project_path, "foundry.toml")):
+        return project_path
+    for sub in ("contracts", "hardhat", "solidity"):
+        sub_path = os.path.join(project_path, sub)
+        if os.path.exists(os.path.join(sub_path, "foundry.toml")):
+            return sub_path
+    return project_path
+
 
 # ============================================================
 # npm/pnpm audit (shared)

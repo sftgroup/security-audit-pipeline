@@ -14,8 +14,8 @@ description: "三层AI安全审计流水线：3个入口MCP工具(contract/centr
 - [ ] Skill 已安装：`openclaw skills list | grep security-audit`
 - [ ] security-tools MCP 已注册：`openclaw mcp list | grep security-tools`
 - [ ] MCP probe 有 46 tools：`openclaw mcp probe security-tools`
-- [ ] 4 子代理 AGENTS.md 已更新（security/security-check/centralized/qa）
-- [ ] security 子代理 model = `zhipu/glm-5.2`（SCSVS 85 项需要 128K context）
+- [ ] 3 安全子代理 AGENTS.md 已就位（security / security-check / centralized）
+- [ ] security 子代理 model = `zhipu/glm-5.2`，两个 check 用 `deepseek-v4-pro`
 - [ ] Gateway 已重启
 - [ ] 测试：`security-tools__contract_audit({"project_path":"/opt/mcp/repos/team2","scope":"static"})`
 
@@ -73,12 +73,12 @@ security-tools__query_intelligence({"category":"defi"})  // defi/web/cve/exploit
 
 ## 项目类型 → 路由决策
 
-| 特征 | 需 spawn 的子代理 |
-|------|------------------|
-| `contracts/src/*.sol` + `foundry.toml` | tester + qa + security-security + security-check |
-| 无合约文件 (Node.js/React/Python/Go) | tester + qa + security-check-centralized |
-| 两者都有（混合项目） | tester + qa + security-security + security-check + security-check-centralized |
-| 已上线（有 URL） | 上述 + 补调 production_audit |
+| 特征 | 必须 spawn（安全） | 可选 spawn |
+|------|-------------------|-----------|
+| `contracts/src/*.sol` + `foundry.toml` | security + security-check | qa（功能审查，独立 MCP） |
+| 无合约文件 (Node.js/React/Python/Go) | security-check-centralized | qa（功能审查，独立 MCP） |
+| 两者都有（混合项目） | security + security-check + centralized | qa（功能审查，独立 MCP） |
+| 已上线（有 URL） | 上述 + production_audit | — |
 
 ---
 
@@ -87,12 +87,12 @@ security-tools__query_intelligence({"category":"defi"})  // defi/web/cve/exploit
 | Step | 角色 | 动作 |
 |:--:|------|------|
 | 1 | 架构师 | 判断项目类型 → rsync 到 MCP 服务器 `/opt/mcp/repos/{team}` |
-| 2 | 架构师 | 并行 spawn tester + qa + security + security-check + security-check-centralized |
-| 3 | 子代理 | 直接调 `security-tools__*()` / `code-review__review_all()` 原生工具 |
+| 2 | 架构师 | 并行 spawn security + security-check + security-check-centralized（按类型） |
+| 3 | 子代理 | 直接调 `security-tools__*()` MCP 原生工具 |
 | 4 | 子代理 | 分批 write 报告到 `{项目}/test-reports/` |
-| 5 | 架构师 | 汇总报告 → 修 Critical + High |
-| 6 | 架构师 | 部署测服 → spawn tester 回归 |
-| 7 | 架构师 | 汇报上级（附 4 份报告链接） |
+| 5 | 架构师 | 汇总 3 份安全报告 → 修 Critical + High |
+| 6 | 架构师 | 部署测服 → 回归测试 |
+| 7 | 架构师 | 汇报上级 |
 
 ---
 
@@ -101,48 +101,26 @@ security-tools__query_intelligence({"category":"defi"})  // defi/web/cve/exploit
 ### 合约/混合项目 — 完整 spawn
 
 ```
-sessions_spawn tester "对项目执行测试:
-- 项目: {项目根目录}
-- MCP路径: /opt/mcp/repos/{team}
-- 读: {项目}/test-reports/TEST_SCENARIOS_*.md
-- 产出: {项目}/test-reports/E2E_TEST_REPORT.md"
+sessions_spawn security "模型=zhipu/glm-5.2:
+security-tools__contract_audit(project_path='/opt/mcp/repos/{team}', scope='full')
+security-tools__query_intelligence(category='defi')
+威胁建模+钱流+SCSVS 85项
+产出: {项目}/test-reports/SECURITY_REVIEW_REPORT.md"
 
-sessions_spawn qa "对项目执行代码审查:
-- 项目: {项目根目录}
-- MCP路径: /opt/mcp/repos/{team}
-- L0: code-review__review_all(project_path='/opt/mcp/repos/{team}', language='all')
-- L1+L2: 读源码审查
-- 产出: {项目}/test-reports/QA_REVIEW_REPORT.md"
+sessions_spawn security-check "模型=deepseek-v4-pro:
+security-tools__contract_audit(project_path='/opt/mcp/repos/{team}', scope='full')
+SCSVS 映射 + Immunefi 对标
+产出: {项目}/test-reports/SECURITY_SCAN_REPORT.md"
 
-sessions_spawn security "对项目执行深度安全审计:
-- 项目: {项目根目录}
-- MCP路径: /opt/mcp/repos/{team}
-- security-tools__contract_audit(project_path='/opt/mcp/repos/{team}', scope='full')
-- security-tools__query_intelligence(category='defi')
-- 源码分析: 威胁建模+钱流+SCSVS 85项
-- 模型: zhipu/glm-5.2 (128K context required for 85-item SCSVS)
-- 产出: {项目}/test-reports/SECURITY_REVIEW_REPORT.md"
-
-sessions_spawn security-check "对项目执行合约安全扫描:
-- 项目: {项目根目录}
-- MCP路径: /opt/mcp/repos/{team}
-- security-tools__contract_audit(project_path='/opt/mcp/repos/{team}', scope='full')
-- SCSVS 映射 + Immunefi 对标
-- 产出: {项目}/test-reports/SECURITY_SCAN_REPORT.md"
-
-sessions_spawn security-check-centralized "对项目执行中心化安全扫描:
-- 项目: {项目根目录}
-- MCP路径: /opt/mcp/repos/{team}
-- security-tools__centralized_audit(project_path='/opt/mcp/repos/{team}', scope='all', language='auto')
-- OWASP 映射
-- 产出: {项目}/test-reports/SECURITY_SCAN_REPORT_CENTRALIZED.md"
+sessions_spawn security-check-centralized "模型=deepseek-v4-pro:
+security-tools__centralized_audit(project_path='/opt/mcp/repos/{team}', scope='all', language='auto')
+OWASP 映射
+产出: {项目}/test-reports/SECURITY_SCAN_REPORT_CENTRALIZED.md"
 ```
 
 ### 纯中心化项目 — 精简 spawn
 
 ```
-sessions_spawn tester → (同上)
-sessions_spawn qa → (同上)
 sessions_spawn security-check-centralized → (同上)
 ```
 
@@ -188,7 +166,5 @@ cron: `0 6 * * * bash {SKILL_DIR}/scripts/update-security-kb.sh`
 | 子代理 | 模型 | 原因 |
 |--------|------|------|
 | security | `zhipu/glm-5.2` | SCSVS 85 项 + 源码分析需要 128K context |
-| security-check | `deepseek-v4-pro` | 扫描汇总 + SCSVS 映射 |
-| security-check-centralized | `deepseek-v4-pro` | OWASP 映射 |
-| qa | `deepseek-v4-pro` | 代码审查 L1+L2 |
-| tester | `deepseek-v4-pro` | 自动化测试 |
+| security-check | `deepseek-v4-pro` | 扫描汇总 + SCSVS 映射（不超 32K） |
+| security-check-centralized | `deepseek-v4-pro` | OWASP 映射（不超 32K） |

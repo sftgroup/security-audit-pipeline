@@ -73,23 +73,6 @@ async def handle_sse(request):
 async def handle_messages(request):
     await sse.handle_post_message(request.scope, request.receive, request._send)
 
-# --- Root endpoint (MCP discovery) ---
-
-async def root_info(request):
-    return JSONResponse({
-        "service": "security-tools-mcp",
-        "version": "2.2",
-        "protocol": "SSE + REST",
-        "tools": len(ALL_TOOLS),
-        "entry_tools": ["contract_audit", "centralized_audit", "production_audit"],
-        "endpoints": {
-            "health": "GET /health",
-            "sse": "GET /sse",
-            "rest_tools": "POST /api/tools/{tool_name}",
-            "list_tools": "GET /api/tools"
-        }
-    })
-
 # --- Health check ---
 
 async def health(request):
@@ -158,7 +141,6 @@ async def api_list_tools(request):
 
 app = Starlette(
     routes=[
-        Route("/", root_info, methods=["GET"]),
         Route("/health", health, methods=["GET"]),
         Route("/sse", handle_sse, methods=["GET"]),
         Route("/messages/", handle_messages, methods=["POST"]),

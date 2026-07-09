@@ -8,7 +8,7 @@ Composite: contract_audit — orchestrates all 16 sub-tools, returns unified rep
 """
 
 import mcp.types as types
-from .shared import run_npm_audit, run_nmap, run_nuclei, run_zap
+from .shared import run_npm_audit, run_nmap, run_nuclei, run_zap, find_contract_dir, run
 
 # ============================================================
 # Tool Definitions
@@ -111,7 +111,7 @@ CONTRACT_TOOLS = [
                 "project_path": {"type": "string", "description": "Path to contract project"},
                 "target_contract": {"type": "string", "description": "Target .sol file path relative to project"}
             },
-            "required": ["project_path", "target_contract"]
+            "required": ["project_path"]
         }
     ),
     types.Tool(
@@ -125,7 +125,7 @@ CONTRACT_TOOLS = [
                 "contract_name": {"type": "string", "description": "Contract name in harness"},
                 "test_limit": {"type": "integer", "description": "Max test sequences (default: 100000)"}
             },
-            "required": ["project_path", "harness_path", "contract_name"]
+            "required": ["project_path"]
         }
     ),
     types.Tool(
@@ -273,9 +273,9 @@ async def handle_contract_tool(name: str, args: dict) -> str | None:
     return None
 
 async def _forge_build(args: dict) -> dict:
-    project = args["project_path"]
+    project = find_contract_dir(args["project_path"])
     try:
-        r = subprocess.run(["forge", "build"], cwd=project, capture_output=True, text=True, timeout=120)
+        r = run(["forge", "build"], cwd=project, capture_output=True, text=True, timeout=120)
         return {
             "tool": "forge build",
             "success": r.returncode == 0,
@@ -289,13 +289,13 @@ async def _forge_build(args: dict) -> dict:
         return {"tool": "forge build", "error": str(e)}
 
 async def _forge_test(args: dict) -> dict:
-    project = args["project_path"]
+    project = find_contract_dir(args["project_path"])
     match = args.get("match", "")
     cmd = ["forge", "test", "-vvv"]
     if match:
         cmd += ["--match-test", match]
     try:
-        r = subprocess.run(cmd, cwd=project, capture_output=True, text=True, timeout=300)
+        r = run(cmd, cwd=project, capture_output=True, text=True, timeout=300)
         # Parse test results
         passed = len(re.findall(r'\[PASS\]', r.stdout))
         failed = len(re.findall(r'\[FAIL', r.stdout))
@@ -312,9 +312,9 @@ async def _forge_test(args: dict) -> dict:
         return {"tool": "forge test", "error": str(e)}
 
 async def _forge_coverage(args: dict) -> dict:
-    project = args["project_path"]
+    project = find_contract_dir(args["project_path"])
     try:
-        r = subprocess.run(["forge", "coverage"], cwd=project, capture_output=True, text=True, timeout=120)
+        r = run(["forge", "coverage"], cwd=project, capture_output=True, text=True, timeout=120)
         # Extract coverage percentage
         cov_match = re.findall(r'(\d+\.?\d*)%', r.stdout)
         coverage = cov_match[-1] if cov_match else "unknown"
@@ -329,24 +329,52 @@ async def _forge_coverage(args: dict) -> dict:
         return {"tool": "forge coverage", "error": str(e)}
 
 async def _slither_scan(args: dict) -> dict:
-    project = args["project_path"]
+    project = find_contract_dir(args["project_path"])
     detect = args.get("detect", "all")
-    cmd = ["slither", ".", "--filter-paths", "lib|test"]
+    # First: get machine-parseable JSON output
+    json_cmd = ["slither", ".", "--filter-paths", "lib|test", "--json", "-"]
     if detect != "all":
-        cmd += ["--detect", detect]
+        json_cmd += ["--detect", detect]
     try:
-        r = subprocess.run(cmd, cwd=project, capture_output=True, text=True, timeout=300)
-        # Parse findings
-        findings = re.findall(r'(\w+)\.(\w+) \(([^)]+)\)', r.stdout)
-        high = len([f for f in findings if 'High' in str(f)])
-        med = len([f for f in findings if 'Medium' in str(f)])
-        low = len([f for f in findings if 'Low' in str(f)])
+        r = run(json_cmd, cwd=project, timeout=300)
+        findings = []
+        high, med, low, info_cnt = 0, 0, 0, 0
+        try:
+            from collections import Counter
+            data = json.loads(r.stdout) if r.stdout else {}
+            detectors = data.get("results", {}).get("detectors", [])
+            for det in detectors:
+                impact = det.get("impact", "Informational").capitalize()
+                name = det.get("check", "unknown")
+                desc = det.get("description", "")[:200]
+                n = len(det.get("elements", []))
+                findings.append({"detector": name, "impact": impact, "count": n, "desc": desc})
+                if impact == "High":
+                    high += n
+                elif impact == "Medium":
+                    med += n
+                elif impact == "Low":
+                    low += n
+                else:
+                    info_cnt += n
+        except (json.JSONDecodeError, KeyError):
+            # Fall back to text parsing
+            output = r.stdout if r.stdout else r.stderr
+            high = len(re.findall(r'Impact:\s*High', output))
+            med = len(re.findall(r'Impact:\s*Medium', output))
+            low = len(re.findall(r'Impact:\s*Low', output))
+            info_cnt = len(re.findall(r'Impact:\s*Informational', output))
+            total_match = re.search(r'(\d+)\s+result\(s\)\s+found', output)
+            findings = []
+
+        total = high + med + low + info_cnt
         return {
             "tool": "slither",
             "success": True,
-            "total_findings": len(findings),
-            "high": high, "medium": med, "low": low,
-            "output_tail": r.stdout[-5000:] if r.stdout else r.stderr[-2000:]
+            "total_findings": total,
+            "high": high, "medium": med, "low": low, "info": info_cnt,
+            "findings": findings,
+            "output_tail": r.stderr[-2000:] if r.stderr else ""
         }
     except FileNotFoundError:
         return {"tool": "slither", "error": "slither not installed"}
@@ -354,12 +382,12 @@ async def _slither_scan(args: dict) -> dict:
         return {"tool": "slither", "error": str(e)}
 
 async def _slither_custom(args: dict) -> dict:
-    project = args["project_path"]
+    project = find_contract_dir(args["project_path"])
     detector_path = args["detector_path"]
     detectors = "v2-unprotected-initializer,v3-storage-layout,v4-unchecked-delegatecall,v10-approve-race,v14-flashloan-callback"
     env = {**os.environ, "SLITHER_PLUGINS": detector_path}
     try:
-        r = subprocess.run(
+        r = run(
             ["slither", ".", "--detect", detectors, "--filter-paths", "lib|test"],
             cwd=project, capture_output=True, text=True, timeout=300, env=env
         )
@@ -374,18 +402,33 @@ async def _slither_custom(args: dict) -> dict:
         return {"tool": "slither-custom", "error": str(e)}
 
 async def _aderyn_scan(args: dict) -> dict:
-    project = args["project_path"]
+    project = find_contract_dir(args["project_path"])
     try:
-        r = subprocess.run(["aderyn", "."], cwd=project, capture_output=True, text=True, timeout=300)
-        # Parse aderyn findings
-        issues = re.findall(r'(\w+-\d+):\s*(.+)', r.stdout)
-        critical = len([i for i in issues if 'Critical' in i[1] or 'critical' in i[1]])
-        high = len([i for i in issues if 'High' in i[1] or 'high' in i[1]])
+        r = run(["aderyn", "."], cwd=project, timeout=300)
+        output = r.stdout if r.stdout else r.stderr
+        # Parse aderyn findings from stdout + report.md
+        issues = re.findall(r'(\w+-\d+):\s*(.+)', output)
+        # Also check report.md for structured output (aderyn uses ## H-1: ... format)
+        report_path = os.path.join(project, "report.md")
+        if not issues and os.path.exists(report_path):
+            try:
+                with open(report_path, "r") as f:
+                    report = f.read()
+                # Parse issue headers: ## H-1: Title or ## L-1: Title
+                headers = re.findall(r'^##\s+([HML])-(\d+):\s*(.+?)$', report, re.MULTILINE)
+                issues = [(f"{sev}-{num}", f"{sev}: {title.strip()}") for sev, num, title in headers]
+            except Exception:
+                pass
+        critical = len([i for i in issues if i[1].startswith("C:") or "critical" in i[1].lower()])
+        high = len([i for i in issues if i[1].startswith("H:")])
+        medium = len([i for i in issues if i[1].startswith("M:")])
+        low = len([i for i in issues if i[1].startswith("L:") or i[1].startswith("I:")])
         return {
             "tool": "aderyn",
             "total_issues": len(issues),
-            "critical": critical, "high": high,
-            "output_tail": r.stdout[-4000:] if r.stdout else r.stderr[-2000:]
+            "critical": critical, "high": high, "medium": medium, "low": low,
+            "issues": issues[:20] if issues else [],
+            "output_tail": output[-3000:] if output else ""
         }
     except FileNotFoundError:
         return {"tool": "aderyn", "error": "aderyn not installed"}
@@ -394,9 +437,9 @@ async def _aderyn_scan(args: dict) -> dict:
 
 async def _mythril_analyze(args: dict) -> dict:
     project = args["project_path"]
-    target = args["target_contract"]
+    target = args.get("target_contract", "src/")
     try:
-        r = subprocess.run(
+        r = run(
             ["myth", "analyze", target, "--execution-timeout", "120"],
             cwd=project, capture_output=True, text=True, timeout=300
         )
@@ -417,12 +460,14 @@ async def _mythril_analyze(args: dict) -> dict:
         return {"tool": "mythril", "error": str(e)}
 
 async def _echidna_fuzz(args: dict) -> dict:
-    project = args["project_path"]
-    harness = args["harness_path"]
-    contract = args["contract_name"]
+    project = find_contract_dir(args["project_path"])
+    harness = args.get("harness_path", "")
+    contract = args.get("contract_name", "")
     limit = str(args.get("test_limit", 100000))
+    if not harness or not contract:
+        return {"tool": "echidna", "skipped": True, "reason": "harness_path and contract_name required for echidna fuzzing"}
     try:
-        r = subprocess.run(
+        r = run(
             ["echidna-test", harness, "--contract", contract, "--test-limit", limit],
             cwd=project, capture_output=True, text=True, timeout=600
         )
@@ -443,10 +488,10 @@ async def _echidna_fuzz(args: dict) -> dict:
         return {"tool": "echidna", "error": str(e)}
 
 async def _semgrep_solidity(args: dict) -> dict:
-    project = args["project_path"]
+    project = find_contract_dir(args["project_path"])
     src = args.get("src_dir", "src/")
     try:
-        r = subprocess.run(
+        r = run(
             ["semgrep", "--config", "solidity", src, "--json"],
             cwd=project, capture_output=True, text=True, timeout=120
         )
@@ -469,10 +514,10 @@ async def _semgrep_solidity(args: dict) -> dict:
         return {"tool": "semgrep", "error": str(e)}
 
 async def _solhint_lint(args: dict) -> dict:
-    project = args["project_path"]
+    project = find_contract_dir(args["project_path"])
     pattern = args.get("src_pattern", "src/**/*.sol")
     try:
-        r = subprocess.run(
+        r = run(
             ["npx", "solhint", pattern],
             cwd=project, capture_output=True, text=True, timeout=60
         )
@@ -508,34 +553,48 @@ async def _zap_scan(args: dict) -> dict:
 
 async def _grep_secrets(args: dict) -> dict:
     project = args["project_path"]
-    pattern = args.get("patterns", r'0x[a-fA-F0-9]{64}|private_key|password\s*=|secret\s*=|api_key\s*=|sk-[a-zA-Z0-9]{32,}')
+    # Use gitleaks for accurate secret detection (fewer false positives than grep)
     try:
-        r = subprocess.run(
-            ["grep", "-rInE", pattern, project, "--exclude-dir=node_modules", "--exclude-dir=.git", "--exclude-dir=lib"],
-            capture_output=True, text=True, timeout=60
+        r = run(
+            ["gitleaks", "detect", "--source", project, "--no-git", "--verbose", "-f", "json"],
+            capture_output=True, text=True, timeout=120
         )
-        lines = r.stdout.strip().split("\n") if r.stdout.strip() else []
-        return {
-            "tool": "grep-secrets",
-            "matches": len(lines),
-            "files_affected": len(set(l.split(":")[0] for l in lines if ":" in l)),
-            "samples": lines[:20]
-        }
+        if r.returncode == 0:
+            return {"tool": "gitleaks", "matches": 0, "leaks": []}
+        try:
+            data = json.loads(r.stdout)
+            leaks = []
+            for leak in data[:30]:
+                leaks.append({
+                    "file": leak.get("File", ""),
+                    "rule": leak.get("RuleID", ""),
+                    "secret": leak.get("Secret", "")[:20] + "...",
+                })
+            return {
+                "tool": "gitleaks",
+                "matches": len(data),
+                "files_affected": len(set(l.get("File","") for l in data)),
+                "leaks": leaks
+            }
+        except json.JSONDecodeError:
+            return {"tool": "gitleaks", "matches": 0}
+    except FileNotFoundError:
+        # Fall back to simple grep
+        return {"tool": "gitleaks", "error": "gitleaks not installed"}
     except Exception as e:
-        return {"tool": "grep-secrets", "error": str(e)}
-
+        return {"tool": "gitleaks", "error": str(e)}
 async def _cast_verify(args: dict) -> dict:
     address = args["contract_address"]
     rpc = args["rpc_url"]
     try:
         # Check if contract is deployed
-        r = subprocess.run(
+        r = run(
             ["cast", "codesize", address, "--rpc-url", rpc],
             capture_output=True, text=True, timeout=30
         )
         codesize = r.stdout.strip()
         # Get admin/owner if possible
-        r2 = subprocess.run(
+        r2 = run(
             ["cast", "call", address, "owner()(address)", "--rpc-url", rpc],
             capture_output=True, text=True, timeout=30
         )
@@ -577,7 +636,7 @@ async def _contract_audit(args: dict) -> dict:
         results["sections"]["test"] = await _forge_test(args)
 
     # === Static Analysis ===
-    if scope in ("static", "all"):
+    if scope in ("static", "all", "full"):
         if "slither" not in skip:
             results["sections"]["slither"] = await _slither_scan(args)
         if "aderyn" not in skip:
@@ -590,12 +649,12 @@ async def _contract_audit(args: dict) -> dict:
             results["sections"]["mythril"] = await _mythril_analyze(args)
 
     # === Fuzzing ===
-    if scope in ("fuzz", "all"):
+    if scope in ("fuzz", "all", "full"):
         if "echidna" not in skip:
             results["sections"]["echidna"] = await _echidna_fuzz(args)
 
     # === Secrets & Dependency ===
-    if scope in ("secrets", "all"):
+    if scope in ("secrets", "all", "full"):
         if "grep" not in skip:
             results["sections"]["secrets"] = await _grep_secrets(args)
         if "npm" not in skip:
@@ -603,7 +662,7 @@ async def _contract_audit(args: dict) -> dict:
 
     # === Verification ===
     deployed = args.get("deployed_address", "")
-    if deployed and scope in ("verify", "all"):
+    if deployed and scope in ("verify", "all", "full"):
         results["sections"]["contract_verification"] = await _cast_verify(args)
 
     # === Summary ===
@@ -612,50 +671,100 @@ async def _contract_audit(args: dict) -> dict:
 
 
 def _contract_summary(sections: dict) -> dict:
+    """Parse individual tool results and produce a unified risk summary.
+    
+    Each tool handler returns flat fields (high, medium, low, critical, etc.).
+    We aggregate them here and produce a final risk_level.
+    """
     critical, high, medium, low = 0, 0, 0, 0
+    all_findings = []  # collect structured finding dicts for the report
 
     for name, section in sections.items():
         if not isinstance(section, dict):
             continue
-        if name == "slither":
-            sevs = section.get("severity", {})
-            high += sevs.get("High", 0)
-            medium += sevs.get("Medium", 0)
-            low += sevs.get("Low", 0)
+
+        # Skip tools that errored out (not installed / failed)
+        if section.get("error"):
+            continue
+
+        if name in ("build", "coverage", "cast_verify"):
+            # These are informational, not finding producers
+            pass
+
+        elif name == "slither":
+            h = section.get("high", 0); m = section.get("medium", 0); l = section.get("low", 0)
+            high += h; medium += m; low += l
+            if h + m + l > 0:
+                all_findings.append({"source": "slither", "high": h, "medium": m, "low": l})
+
         elif name == "aderyn":
-            total = section.get("total_findings", 0) or len(section.get("findings", []))
-            high += total
+            c = section.get("critical", 0); h = section.get("high", 0)
+            m = section.get("medium", 0); l = section.get("low", 0)
+            total = section.get("total_issues", 0)
+            critical += c; high += h; medium += m; low += l
+            if total > 0:
+                all_findings.append({"source": "aderyn", "total": total, "critical": c, "high": h, "medium": m, "low": l})
+
         elif name == "mythril":
-            sevs = section.get("severity", {})
-            high += sevs.get("High", 0)
-            medium += sevs.get("Medium", 0)
+            h = section.get("high", 0); m = section.get("medium", 0); l = section.get("low", 0)
+            high += h; medium += m; low += l
+            if h + m + l > 0:
+                all_findings.append({"source": "mythril", "high": h, "medium": m, "low": l})
+
         elif name == "semgrep":
-            sevs = section.get("severity", {})
-            high += sevs.get("ERROR", 0)
-            medium += sevs.get("WARNING", 0)
+            sb = section.get("severity_breakdown", {})
+            h = sb.get("ERROR", 0); m = sb.get("WARNING", 0); l = sb.get("INFO", 0)
+            high += h; medium += m; low += l
+            if h + m + l > 0:
+                all_findings.append({"source": "semgrep", "high": h, "medium": m, "low": l})
+
         elif name == "solhint":
-            total = section.get("total_issues", 0) or len(section.get("issues", []))
-            medium += total
+            e = section.get("errors", 0); w = section.get("warnings", 0)
+            medium += e; low += w
+            if e + w > 0:
+                all_findings.append({"source": "solhint", "errors": e, "warnings": w})
+
         elif name == "echidna":
             failed = section.get("failed", 0)
             if failed > 0:
-                critical += 1
+                critical += failed
+                all_findings.append({"source": "echidna", "failed_properties": failed})
+
         elif name == "secrets":
-            found = section.get("total_found", 0) or section.get("matches", 0)
-            if found > 0:
-                critical += found
+            matches = section.get("matches", 0)
+            if matches > 0:
+                critical += min(matches, 5)  # Cap impact: max 5 critical per section
+                leaks = section.get("leaks", [])
+                all_findings.append({"source": "gitleaks", "matches": matches,
+                                     "files_affected": section.get("files_affected", 0),
+                                     "leaks": leaks})
+
         elif name == "npm_audit":
-            critical += section.get("critical", 0)
-            high += section.get("high", 0)
+            c = section.get("critical", 0); h = section.get("high", 0); m = section.get("medium", 0)
+            critical += c; high += h; medium += m
+            if c + h + m > 0:
+                all_findings.append({"source": "npm_audit", "critical": c, "high": h, "medium": m})
+
         elif name == "test":
             if section.get("failed", 0) > 0:
                 high += 1
+                all_findings.append({"source": "forge_test", "failed": section["failed"]})
 
-    risk = "CRITICAL" if critical > 0 else "HIGH" if high > 5 else "MEDIUM" if high > 0 or medium > 5 else "LOW"
+    # ── Risk grading ──
+    if critical > 0:
+        risk = "CRITICAL"
+    elif high > 3:
+        risk = "HIGH"
+    elif high > 0 or medium > 3:
+        risk = "MEDIUM"
+    else:
+        risk = "LOW"
+
     return {
         "risk_level": risk,
         "critical": critical,
         "high": high,
         "medium": medium,
-        "low": low
+        "low": low,
+        "findings": all_findings
     }
