@@ -1,173 +1,163 @@
 ---
 name: security-audit-pipeline
-description: "三层AI安全审计流水线:qa+security+security-check(合约/中心化)。14源威胁情报+REST API多MCP入口。v2.2分层取模式"
+description: "三层AI安全审计流水线：3个入口MCP工具(contract/centralized/production)覆盖85项SCSVS+OWASP，14源威胁情报。子代理原生MCP调用，零安装。v3.0"
 ---
 
 # Security Audit Pipeline
 
-三层 AI Agent 安全审计流水线，覆盖合约安全审计 + 中心化应用安全审计 + 上线后生产环境安全检测。
+三层 AI Agent 安全审计流水线 — 合约 (contract_audit) / 中心化 (centralized_audit) / 上线后 (production_audit) — 全栈覆盖。
 
-Agent 加载此 Skill 后通过 REST API 调用 MCP 入口工具完成全量审计，无需自己安装任何扫描工具。
+**当前版本: v3.0** — MCP Native Tools（子代理直接调 `security-tools__*()` 函数，不 curl）。
 
-**当前版本: v2.2** — 分层取模式（MCP 返回摘要 + result_file，子代理按需 read 文件，省 ~95% token）
+## 架构师自检清单（apply 后必做）
 
-## 核心：多 MCP REST API 入口（v2.2 分层取模式）⭐
+- [ ] Skill 已安装：`openclaw skills list | grep security-audit`
+- [ ] security-tools MCP 已注册：`openclaw mcp list | grep security-tools`
+- [ ] MCP probe 有 46 tools：`openclaw mcp probe security-tools`
+- [ ] 4 子代理 AGENTS.md 已更新（security/security-check/centralized/qa）
+- [ ] security 子代理 model = `zhipu/glm-5.2`（SCSVS 85 项需要 128K context）
+- [ ] Gateway 已重启
+- [ ] 测试：`security-tools__contract_audit({"project_path":"/opt/mcp/repos/team2","scope":"static"})`
 
-3 个 MCP 服务器，统一通过 `curl POST` REST API 调用。**v2.2 起 MCP 返回摘要 + 全量结果写入文件系统，子代理分两步走。**
+---
 
-### ⚠️ 分层取流程（子代理必须遵守）
+## 核心：多 MCP Native Tools 入口
+
+3 个 MCP 服务器通过 OpenClaw 原生工具调用：
+
+| MCP Server | 端口 | Tools | 前缀 | 使用者 |
+|-----------|------|-------|------|--------|
+| **security-tools** | 3000 | 46 | `security-tools__` | security, security-check, centralized |
+| **code-review** | 9001 | 7 | `code-review__` | qa |
+| **git** | 3082 | 19 | `git__` | team2 (架构师) |
+
+### security-tools — 3 个入口工具（子代理直接调）
+
+#### 1. `security-tools__contract_audit()` — 合约全量审计
 
 ```
-Step 1: curl MCP → 拿到摘要 (~200字节) + result_file 路径 + sections 列表
-Step 2: 看 summary — risk_level 不为 LOW 时，按需 read result_file 中有问题的 section（不是整个文件！）
+security-tools__contract_audit({"project_path":"/opt/mcp/repos/team2","scope":"full"})
 ```
 
-| MCP Server | 端口 | 协议 | 用途 |
-|-----------|------|------|------|
-| **security-tools** | 3000 | REST `/api/tools/` | 合约+中心化+上线后审计 (46 tools, 3 entry) |
-| **code-review** | 9001 | JSON-RPC `/mcp` | 代码质量机械检查 (QA L0) |
-| **git** | 3082 | — | 版本控制 (当前不可用，用 md5sum 替代) |
+| scope | 覆盖 |
+|-------|------|
+| `"static"` | forge build + test + slither(106) + aderyn + semgrep + solhint |
+| `"full"` | static + mythril + echidna + gitleaks + npm/pip audit |
+| `"secrets"` | 仅 gitleaks + npm/pip audit |
 
-### security-tools MCP (3000) — 3 个入口工具
+内部编排 14 个原子子工具，自动执行。
 
-```bash
-curl -s -X POST http://43.156.46.187:3000/api/tools/{tool_name} \
-  -H 'Content-Type: application/json' \
-  -d '{"key":"value"}'
+#### 2. `security-tools__centralized_audit()` — 中心化全量审计
+
 ```
-
-**注意：-d 用单引号包裹 JSON。所有工具统一此语法。**
-
-#### `contract_audit`
-
-```bash
-curl -s -X POST http://43.156.46.187:3000/api/tools/contract_audit \
-  -H 'Content-Type: application/json' \
-  -d '{"project_path":"/opt/mcp/repos/team2","scope":"full"}'
-```
-
-内部编排：`forge build → forge test → slither(106) → aderyn → mythril → echidna → semgrep → solhint → grep secrets → npm audit`
-
-**返回格式（v2.1+）：**
-```json
-{
-  "ok": true,
-  "summary": {"risk_level": "LOW", "critical": 0, "high": 0},
-  "sections": ["build", "test", "slither", "aderyn", ...],
-  "result_file": "/opt/mcp/repos/team2/mcp-output/contract_audit_latest.json",
-  "hint": "Full result saved. Read result_file for details."
-}
-```
-
-#### `centralized_audit`
-
-```bash
-curl -s -X POST http://43.156.46.187:3000/api/tools/centralized_audit \
-  -H 'Content-Type: application/json' \
-  -d '{"project_path":"/opt/mcp/repos/team2","scope":"all","language":"auto"}'
+security-tools__centralized_audit({"project_path":"/opt/mcp/repos/team2","scope":"all","language":"auto"})
 ```
 
 内部编排：SAST (semgrep/bandit/gosec/eslint/gitleaks) + DAST (nuclei/zap/nikto) + SCA (npm/pip/cargo/trivy) + Infra (nmap/lynis) + Compliance (testssl/cors/headers)
 
-#### `production_audit`
+#### 3. `security-tools__production_audit()` — 上线后安全检测
 
-```bash
-curl -s -X POST http://43.156.46.187:3000/api/tools/production_audit \
-  -H 'Content-Type: application/json' \
-  -d '{"target_url":"https://app.example.com","domain":"all"}'
+```
+security-tools__production_audit({"target_url":"https://app.example.com","domain":"all"})
 ```
 
 24 项上线后检测。
 
 #### 威胁情报
 
-```bash
-curl -s -X POST http://43.156.46.187:3000/api/tools/query_intelligence \
-  -H 'Content-Type: application/json' \
-  -d '{"category":"defi"}'
 ```
-
-### code-review MCP (9001) — QA L0 机械检查
-
-```bash
-curl -s -X POST http://43.156.46.187:9001/mcp \
-  -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"review_all","arguments":{"project_path":"/opt/mcp/repos/team2","language":"all"}},"id":1}'
+security-tools__query_intelligence({"category":"defi"})  // defi/web/cve/exploit
 ```
-
-覆盖：lint (solhint/eslint/ruff/shellcheck) + format (prettier/black/shfmt) + types (tsc/mypy) + complexity + deps audit
 
 ---
 
-## 项目类型 → 路由
+## 项目类型 → 路由决策
 
-| 特征 | 子代理 | 入口工具 | MCP |
-|------|--------|---------|-----|
-| `contracts/src/*.sol` + `foundry.toml` | qa + security + security-check | contract_audit | 3000 |
-| 无合约文件 (Node.js/React/Python/Go) | qa + security-check-centralized | centralized_audit | 3000 |
-| 两者都有 | qa + security + security-check + centralized | contract_audit + centralized_audit | 3000 |
-| 已上线(有 URL) | 上述 + production_audit | production_audit | 3000 |
+| 特征 | 需 spawn 的子代理 |
+|------|------------------|
+| `contracts/src/*.sol` + `foundry.toml` | tester + qa + security-security + security-check |
+| 无合约文件 (Node.js/React/Python/Go) | tester + qa + security-check-centralized |
+| 两者都有（混合项目） | tester + qa + security-security + security-check + security-check-centralized |
+| 已上线（有 URL） | 上述 + 补调 production_audit |
 
 ---
 
-## 审计流程（7步）
+## 审计流程（7 步）
 
 | Step | 角色 | 动作 |
 |:--:|------|------|
 | 1 | 架构师 | 判断项目类型 → rsync 到 MCP 服务器 `/opt/mcp/repos/{team}` |
-| 2 | 架构师 | 并行 spawn qa + security + security-check (+ centralized) |
-| 3 | 子代理 | **分层取**: curl MCP → 拿摘要 → 按需 read result_file → 读源码分析 |
+| 2 | 架构师 | 并行 spawn tester + qa + security + security-check + security-check-centralized |
+| 3 | 子代理 | 直接调 `security-tools__*()` / `code-review__review_all()` 原生工具 |
 | 4 | 子代理 | 分批 write 报告到 `{项目}/test-reports/` |
-| 5 | 架构师 | 汇总报告 → 判定严重度 → 修复 Critical+High |
-| 6 | 架构师 | 部署测服 → autotest run |
-| 7 | 架构师 | 汇报上级 |
+| 5 | 架构师 | 汇总报告 → 修 Critical + High |
+| 6 | 架构师 | 部署测服 → spawn tester 回归 |
+| 7 | 架构师 | 汇报上级（附 4 份报告链接） |
 
 ---
 
-## Spawn 模板（v2.2 分层取）
+## Spawn 模板（v3.0 MCP Native）
 
-### 合约项目
+### 合约/混合项目 — 完整 spawn
+
 ```
-qa agent:
-  Step 1: exec curl POST http://43.156.46.187:9001/mcp → review_all → 拿结果
-  Step 2: read 源码 L1+L2+L3 审查
-  Step 3: 分批 write 追加 → QA_REVIEW_REPORT.md
-  → 产出: {项目}/test-reports/QA_REVIEW_REPORT.md
+sessions_spawn tester "对项目执行测试:
+- 项目: {项目根目录}
+- MCP路径: /opt/mcp/repos/{team}
+- 读: {项目}/test-reports/TEST_SCENARIOS_*.md
+- 产出: {项目}/test-reports/E2E_TEST_REPORT.md"
 
-security agent (model=zhipu/glm-5.2):  ⬅️ 注意：必须 GLM-5.2！
-  Step 1: exec curl POST http://43.156.46.187:3000/api/tools/contract_audit -d '{"project_path":"/opt/mcp/repos/{team}","scope":"full"}' → 拿摘要+result_file
-  Step 2: exec curl POST http://43.156.46.187:3000/api/tools/query_intelligence -d '{"category":"defi"}' → 拿情报
-  Step 3: 按需 read result_file 中有问题的 section（只读有发现的部分！）
-  Step 4: read 源码 → 威胁建模+钱流+SCSVS 85项 → 分批 write 追加
-  → 产出: {项目}/test-reports/SECURITY_REVIEW_REPORT.md
+sessions_spawn qa "对项目执行代码审查:
+- 项目: {项目根目录}
+- MCP路径: /opt/mcp/repos/{team}
+- L0: code-review__review_all(project_path='/opt/mcp/repos/{team}', language='all')
+- L1+L2: 读源码审查
+- 产出: {项目}/test-reports/QA_REVIEW_REPORT.md"
 
-security-check agent:
-  Step 1: exec curl POST http://43.156.46.187:3000/api/tools/contract_audit -d '{"project_path":"/opt/mcp/repos/{team}","scope":"full"}' → 拿摘要+result_file
-  Step 2: 按需 read result_file → SCSVS 映射 + Immunefi 对标
-  → 产出: {项目}/test-reports/SECURITY_SCAN_REPORT.md
+sessions_spawn security "对项目执行深度安全审计:
+- 项目: {项目根目录}
+- MCP路径: /opt/mcp/repos/{team}
+- security-tools__contract_audit(project_path='/opt/mcp/repos/{team}', scope='full')
+- security-tools__query_intelligence(category='defi')
+- 源码分析: 威胁建模+钱流+SCSVS 85项
+- 模型: zhipu/glm-5.2 (128K context required for 85-item SCSVS)
+- 产出: {项目}/test-reports/SECURITY_REVIEW_REPORT.md"
+
+sessions_spawn security-check "对项目执行合约安全扫描:
+- 项目: {项目根目录}
+- MCP路径: /opt/mcp/repos/{team}
+- security-tools__contract_audit(project_path='/opt/mcp/repos/{team}', scope='full')
+- SCSVS 映射 + Immunefi 对标
+- 产出: {项目}/test-reports/SECURITY_SCAN_REPORT.md"
+
+sessions_spawn security-check-centralized "对项目执行中心化安全扫描:
+- 项目: {项目根目录}
+- MCP路径: /opt/mcp/repos/{team}
+- security-tools__centralized_audit(project_path='/opt/mcp/repos/{team}', scope='all', language='auto')
+- OWASP 映射
+- 产出: {项目}/test-reports/SECURITY_SCAN_REPORT_CENTRALIZED.md"
 ```
 
-### 中心化项目
+### 纯中心化项目 — 精简 spawn
+
 ```
-qa agent: (同上)
-security-check-centralized agent:
-  Step 1: exec curl POST http://43.156.46.187:3000/api/tools/centralized_audit -d '{"project_path":"/opt/mcp/repos/{team}","scope":"all","language":"auto"}' → 拿摘要+result_file
-  Step 2: 按需 read result_file → OWASP 映射
-  → 产出: {项目}/test-reports/SECURITY_SCAN_REPORT_CENTRALIZED.md
+sessions_spawn tester → (同上)
+sessions_spawn qa → (同上)
+sessions_spawn security-check-centralized → (同上)
 ```
 
 ---
 
-## 知识库（14源，每天自动更新）
+## 知识库（14源威胁情报）
 
 ```
 ~/.openclaw/security-kb/
   attack-matrix-{DATE}.md  — 最新威胁快照
 ```
 
-cron: `0 6 * * * {SKILL_DIR}/scripts/update-security-kb.sh`
+cron: `0 6 * * * bash {SKILL_DIR}/scripts/update-security-kb.sh`
 
-## 资产（子 Agent 按需读取）
+## Skill 资产（子代理按需读取）
 
 | 资产 | 路径 | 用途 |
 |------|------|------|
@@ -177,14 +167,28 @@ cron: `0 6 * * * {SKILL_DIR}/scripts/update-security-kb.sh`
 | SCSVS 85项矩阵 | `references/scsvs-matrix-v2.md` | 完整检查表 |
 | 14源详情 | `references/attack-sources.md` | 情报源清单 |
 | OWASP 工具覆盖 | `references/owasp-mapping.md` | ~80% 覆盖映射 |
-| 工具安装命令 | `references/tool-install.md` | 20+ 工具安装 |
+| 工具安装命令 | `references/tool-install.md` | 20+ 工具安装到 MCP 服务器 |
 | Spawn 模板 | `templates/` | 合约/中心化 spawn 指令 |
+
+---
 
 ## 严重度标准 (Immunefi + OWASP)
 
-| Level | 合约 (Immunefi) | 中心化 (OWASP) |
-|-------|-------------------|-------------------|
-| 🔴 Critical | ≥$100K loss, unrestricted fund drain | RCE, 数据泄露, 认证绕过 |
-| 🟠 High | Single-point breach, privileged exploit | XSS/SSRF/IDOR, 逻辑绕过 |
-| 🟡 Medium | Conditional combo, gas griefing | 配置不当, 信息泄露 |
-| 🟢 Low | Best practice, style | Headers, cookies, 指纹 |
+| Level | 合约 (Immunefi) | 中心化 (OWASP) | 响应 |
+|-------|-------------------|-------------------|------|
+| 🔴 Critical | ≥$100K loss, unrestricted fund drain | RCE, 数据泄露, 认证绕过 | 🚨 立即 |
+| 🟠 High | Single-point breach, privileged exploit | XSS/SSRF/IDOR, 逻辑绕过 | 🔴 24h |
+| 🟡 Medium | Conditional combo, gas griefing | 配置不当, 信息泄露 | 🟠 本次迭代 |
+| 🟢 Low | Best practice, style | Headers, cookies, 指纹 | 🟡 技术债 |
+
+---
+
+## 子代理模型要求
+
+| 子代理 | 模型 | 原因 |
+|--------|------|------|
+| security | `zhipu/glm-5.2` | SCSVS 85 项 + 源码分析需要 128K context |
+| security-check | `deepseek-v4-pro` | 扫描汇总 + SCSVS 映射 |
+| security-check-centralized | `deepseek-v4-pro` | OWASP 映射 |
+| qa | `deepseek-v4-pro` | 代码审查 L1+L2 |
+| tester | `deepseek-v4-pro` | 自动化测试 |
