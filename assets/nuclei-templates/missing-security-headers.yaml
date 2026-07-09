@@ -1,0 +1,25 @@
+id: security-audit-security-headers
+info:
+  name: Missing Security Headers
+  author: security-audit-pipeline
+  severity: low
+  description: Checks for missing HTTP security headers
+  tags: owasp-a5, misconfig, security-audit, headers
+
+requests:
+  - method: GET
+    path:
+      - "{{BaseURL}}"
+    matchers-condition: or
+    matchers:
+      - type: word
+        part: header
+        words:
+          - "X-Frame-Options"
+          - "X-Content-Type-Options"
+          - "Content-Security-Policy"
+          - "Strict-Transport-Security"
+          - "Referrer-Policy"
+          - "Permissions-Policy"
+        negative: true
+        condition: or

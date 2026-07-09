@@ -1,0 +1,39 @@
+id: security-audit-info-leak
+info:
+  name: Sensitive Information Disclosure
+  author: security-audit-pipeline
+  severity: high
+  description: Detects sensitive information exposure in API responses and error pages
+  tags: owasp-a3, info-leak, security-audit
+
+requests:
+  - method: GET
+    path:
+      - "{{BaseURL}}/api/.env"
+      - "{{BaseURL}}/.git/config"
+      - "{{BaseURL}}/debug/pprof/"
+      - "{{BaseURL}}/actuator/env"
+      - "{{BaseURL}}/phpinfo.php"
+      - "{{BaseURL}}/server-status"
+      - "{{BaseURL}}/wp-json/"
+    matchers-condition: or
+    matchers:
+      - type: word
+        words:
+          - "DATABASE_URL"
+          - "DB_PASSWORD"
+          - "SECRET_KEY"
+          - "API_KEY"
+          - "AWS_ACCESS_KEY"
+          - "PRIVATE_KEY"
+          - "password"
+      - type: word
+        words:
+          - "stack trace"
+          - "at line"
+          - "in file"
+      - type: word
+        words:
+          - "[branch"
+          - "logallrefupdates"
+        part: body

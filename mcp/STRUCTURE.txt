@@ -1,0 +1,9 @@
+security-tools-server/
+├── server.py              # MCP Server 主入口
+├── tools/
+│   ├── __init__.py
+│   ├── contract.py        # 合约扫描 16 tools
+│   ├── centralized.py     # 中心化扫描 20 tools
+│   └── intel.py           # 威胁情报 6 tools
+├── requirements.txt
+└── install.sh             # 36工具一键安装

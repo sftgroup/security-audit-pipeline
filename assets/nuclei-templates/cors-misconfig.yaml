@@ -1,0 +1,22 @@
+id: security-audit-cors-misconfig
+info:
+  name: CORS Misconfiguration
+  author: security-audit-pipeline
+  severity: medium
+  description: Detects CORS misconfigurations allowing cross-origin requests
+  tags: owasp-a1, cors, security-audit, misconfig
+
+requests:
+  - method: OPTIONS
+    path:
+      - "{{BaseURL}}/api/"
+    headers:
+      Origin: "https://evil.com"
+      Access-Control-Request-Method: "GET"
+    matchers:
+      - type: word
+        part: header
+        words:
+          - "Access-Control-Allow-Origin: https://evil.com"
+          - "Access-Control-Allow-Origin: *"
+          - "Access-Control-Allow-Credentials: true"

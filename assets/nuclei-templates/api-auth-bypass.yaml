@@ -1,0 +1,28 @@
+id: security-audit-api-auth-bypass
+info:
+  name: API Authentication Bypass Checks
+  author: security-audit-pipeline
+  severity: high
+  description: Tests for common API auth bypass patterns
+  tags: owasp-a1, owasp-a7, auth, security-audit
+
+requests:
+  - method: GET
+    path:
+      - "{{BaseURL}}/api/admin/users"
+      - "{{BaseURL}}/api/me"
+      - "{{BaseURL}}/api/config"
+      - "{{BaseURL}}/api/settings"
+      - "{{BaseURL}}/api/health"
+      - "{{BaseURL}}/admin/dashboard"
+    headers:
+      X-Forwarded-For: "127.0.0.1"
+      X-Real-IP: "127.0.0.1"
+    matchers:
+      - type: word
+        words:
+          - "admin"
+          - "users"
+          - "password"
+          - "token"
+          - "secret"

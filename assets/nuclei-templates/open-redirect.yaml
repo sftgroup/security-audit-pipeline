@@ -1,0 +1,19 @@
+id: security-audit-open-redirect
+info:
+  name: Open Redirect Detection
+  author: security-audit-pipeline
+  severity: medium
+  description: Detects open redirect vulnerabilities in web applications
+  tags: owasp-a1, redirect, security-audit
+
+requests:
+  - method: GET
+    path:
+      - "{{BaseURL}}/redirect?url=https://evil.com"
+      - "{{BaseURL}}/callback?next=https://evil.com"
+      - "{{BaseURL}}/auth/redirect?return_to=https://evil.com"
+    matchers:
+      - type: word
+        part: header
+        words:
+          - "Location: https://evil.com"
