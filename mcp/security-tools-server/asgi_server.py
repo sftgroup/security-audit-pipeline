@@ -89,22 +89,40 @@ async def health(request):
 
 async def api_call_tool(request: Request):
     """
-    Simple REST endpoint: POST /api/tools/{tool_name}
-    Body: JSON arguments
-    Response: tool output as JSON
+    REST endpoint: POST /api/tools/{tool_name}
+    Executes tool, writes full result to filesystem, returns summary only.
     """
+    import hashlib
+    from datetime import datetime, timezone
     tool_name = request.path_params.get("tool_name", "")
     if not tool_name:
         return JSONResponse({"error": "Missing tool name"}, status_code=400)
-
     try:
         body = await request.json()
     except Exception:
         body = {}
-
+    project_path = body.get("project_path", "")
+    result_dir = os.path.join(project_path, "mcp-output") if project_path else "/tmp/mcp-results"
+    os.makedirs(result_dir, exist_ok=True)
     try:
-        result = await _route_tool(tool_name, body)
-        return JSONResponse(json.loads(result) if isinstance(result, str) else result)
+        raw = await _route_tool(tool_name, body)
+        data = json.loads(raw) if isinstance(raw, str) else raw
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        result_file = os.path.join(result_dir, f"{tool_name}_{ts}.json")
+        with open(result_file, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+        latest_file = os.path.join(result_dir, f"{tool_name}_latest.json")
+        with open(latest_file, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+        summary = data.get("summary", {}) if isinstance(data, dict) else {}
+        sections = list(data.get("sections", {}).keys()) if isinstance(data, dict) else []
+        return JSONResponse({
+            "ok": True, "tool": tool_name,
+            "result_file": result_file, "result_latest": latest_file,
+            "result_size_bytes": len(json.dumps(data)),
+            "summary": summary, "sections": sections,
+            "hint": f"Full result saved. Read {result_file} for details."
+        })
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
