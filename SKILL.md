@@ -1,74 +1,146 @@
 ---
 name: security-audit-pipeline
-description: "三层AI安全审计流水线:qa+security+security-check(合约/中心化)。14源威胁情报+MCP入口工具。"
+description: "三层AI安全审计流水线:qa+security+security-check(合约/中心化)。14源威胁情报+REST API多MCP入口。"
 ---
 
 # Security Audit Pipeline
 
 三层 AI Agent 安全审计流水线，覆盖合约安全审计 + 中心化应用安全审计 + 上线后生产环境安全检测。
 
-Agent 加载此 Skill 后通过 MCP 调用 3 个入口工具完成全量审计，无需自己安装任何扫描工具。
+Agent 加载此 Skill 后通过 REST API 调用 MCP 入口工具完成全量审计，无需自己安装任何扫描工具。
 
-## 核心：MCP 入口工具（Agent 只需调这 3 个）
+## 核心：多 MCP REST API 入口
 
-MCP Server 部署在 43.156.46.187:3000 (HTTP SSE)，systemd 守护。
+3 个 MCP 服务器，统一通过 `curl POST` REST API 调用：
 
-### 1. `contract_audit` — 智能合约安全审计
+| MCP Server | 端口 | 协议 | 用途 |
+|-----------|------|------|------|
+| **security-tools** | 3000 | REST `/api/tools/` | 合约+中心化+上线后审计 (46 tools) |
+| **code-review** | 9001 | JSON-RPC `/mcp` | 代码质量机械检查 (QA L0) |
+| **git** | 3082 | — | 版本控制 (当前不可用，用 md5sum 替代) |
 
-```json
-{ "project_path": "/path/to/foundry/project", "scope": "all", "deployed_address": "0x..." }
+### security-tools MCP (3000) — 3 个入口工具
+
+```bash
+curl -s -X POST http://43.156.46.187:3000/api/tools/{tool_name} \
+  -H 'Content-Type: application/json' \
+  -d '{"key":"value"}'
 ```
 
-内部自动编排：`forge build → forge test → slither → aderyn → mythril → echidna → semgrep → solhint → grep secrets → npm audit`
+**注意：-d 用单引号包裹 JSON。所有工具统一此语法。**
 
-返回归一化报告含 `summary.risk_level` (CRITICAL/HIGH/MEDIUM/LOW) + 各子工具详细结果。
+#### `contract_audit`
 
-### 2. `centralized_audit` — 中心化应用安全审计
-
-```json
-{ "project_path": "/path/to/project", "target_url": "https://app.example.com", "scope": "all", "language": "js" }
+```bash
+curl -s -X POST http://43.156.46.187:3000/api/tools/contract_audit \
+  -H 'Content-Type: application/json' \
+  -d '{"project_path":"/opt/mcp/repos/team2","scope":"full"}'
 ```
 
-内部自动编排：SAST (semgrep/bandit/gosec/eslint/gitleaks) + DAST (nuclei/nikto/ZAP) + SCA (npm/pip/cargo/trivy) + Infra (nmap/lynis) + Compliance (testssl/cors/headers/whatweb)
+内部编排：`forge build → forge test → slither(106) → aderyn → mythril → echidna → semgrep → solhint → grep secrets → npm audit`
 
-### 3. `production_audit` — 上线后生产安全审计
+返回 `{"sections":{...}, "summary":{"risk_level":"LOW","critical":0,...}}`
 
-```json
-{ "target_url": "https://app.example.com", "domain": "all", "apk_path": "/tmp/app.apk", "deep": false }
+#### `centralized_audit`
+
+```bash
+curl -s -X POST http://43.156.46.187:3000/api/tools/centralized_audit \
+  -H 'Content-Type: application/json' \
+  -d '{"project_path":"/opt/mcp/repos/team2","scope":"all","language":"auto"}'
 ```
 
-内部自动编排：SQL注入/XSS/Wapiti/目录爆破/子域名 + CORS/Headers/SSL/Cookie/JWT/RateLimit + APK分析/密钥扫描 + 端口扫描/SSH/指纹 + OWASP ZAP
+内部编排：SAST (semgrep/bandit/gosec/eslint/gitleaks) + DAST (nuclei/zap/nikto) + SCA (npm/pip/cargo/trivy) + Infra (nmap/lynis) + Compliance (testssl/cors/headers)
 
-### 可选：威胁情报查询 (intel, 6 tools)
+#### `production_audit`
 
-`update_knowledge_base` / `query_intelligence` / `get_latest_attacks` / `check_cve` / `compare_snapshots` / `search_ttp`
+```bash
+curl -s -X POST http://43.156.46.187:3000/api/tools/production_audit \
+  -H 'Content-Type: application/json' \
+  -d '{"target_url":"https://app.example.com","domain":"all"}'
+```
 
-审计前建议先调 `query_intelligence(category="defi")` 获取最新攻击情报注入上下文。
+24 项上线后检测。
+
+#### 威胁情报
+
+```bash
+curl -s -X POST http://43.156.46.187:3000/api/tools/query_intelligence \
+  -H 'Content-Type: application/json' \
+  -d '{"category":"defi"}'
+```
+
+### code-review MCP (9001) — QA L0 机械检查
+
+```bash
+curl -s -X POST http://43.156.46.187:9001/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"review_all","arguments":{"project_path":"/opt/mcp/repos/team2","language":"all"}},"id":1}'
+```
+
+覆盖：lint (solhint/eslint/ruff/shellcheck) + format (prettier/black/shfmt) + types (tsc/mypy) + complexity + deps audit
+
+---
 
 ## 项目类型 → 路由
 
-| 特征 | 审计入口 |
-|------|---------|
-| `contracts/src/*.sol` + `foundry.toml` | `contract_audit` |
-| 无合约文件 (Node.js/React/Python/Go) | `centralized_audit` |
-| 两者都有 | `contract_audit` + `centralized_audit` |
-| 已上线(有 URL/APK) | 上述 + `production_audit` |
+| 特征 | 子代理 | 入口工具 | MCP |
+|------|--------|---------|-----|
+| `contracts/src/*.sol` + `foundry.toml` | qa + security + security-check | contract_audit | 3000 |
+| 无合约文件 (Node.js/React/Python/Go) | qa + security-check-centralized | centralized_audit | 3000 |
+| 两者都有 | qa + security + security-check + centralized | contract_audit + centralized_audit | 3000 |
+| 已上线(有 URL) | 上述 + production_audit | production_audit | 3000 |
 
-## 审计流程
+---
 
-1. 判断项目类型 → 选入口工具
-2. 调 `query_intelligence` 加载最新攻击情报
-3. 调 `contract_audit` / `centralized_audit` / `production_audit`
-4. 读返回的 `summary.risk_level` + 各子工具详细结果
-5. `CRITICAL`/`HIGH` → 修复 → 重新审计回归
-6. 将最终报告写入 `test-reports/SECURITY_AUDIT_REPORT.md`
+## 审计流程（7步）
+
+| Step | 角色 | 动作 |
+|:--:|------|------|
+| 1 | 架构师 | 判断项目类型 → rsync 到 MCP 服务器 `/opt/mcp/repos/{team}` |
+| 2 | 架构师 | 并行 spawn qa + security + security-check (+ centralized) |
+| 3 | 子代理 | qa: curl POST 9001 → review_all / security: curl POST 3000 → contract_audit / check: curl POST 3000 → contract_audit / centralized: curl POST 3000 → centralized_audit |
+| 4 | 子代理 | 写报告到 `{项目}/test-reports/` |
+| 5 | 架构师 | 汇总报告 → 判定严重度 → 修复 Critical+High |
+| 6 | 架构师 | 部署测服 → autotest run |
+| 7 | 架构师 | 汇报上级 |
+
+---
+
+## Spawn 模板
+
+### 合约项目
+```
+qa agent:
+  exec curl POST http://43.156.46.187:9001/mcp → review_all(project_path="/opt/mcp/repos/{team}", language="all")
+  + read 源码 L1+L2+L3 审查
+  → 产出: {项目}/test-reports/QA_REVIEW_REPORT.md
+
+security agent (model=zhipu/glm-5.2):
+  exec curl POST http://43.156.46.187:3000/api/tools/contract_audit -d '{"project_path":"/opt/mcp/repos/{team}","scope":"full"}'
+  + exec curl POST http://43.156.46.187:3000/api/tools/query_intelligence -d '{"category":"defi"}'
+  + read 源码 威胁建模+钱流+SCSVS 85项
+  → 产出: {项目}/test-reports/SECURITY_REVIEW_REPORT.md
+
+security-check agent:
+  exec curl POST http://43.156.46.187:3000/api/tools/contract_audit -d '{"project_path":"/opt/mcp/repos/{team}","scope":"full"}'
+  → 产出: {项目}/test-reports/SECURITY_SCAN_REPORT.md
+```
+
+### 中心化项目
+```
+qa agent: (同上)
+security-check-centralized agent:
+  exec curl POST http://43.156.46.187:3000/api/tools/centralized_audit -d '{"project_path":"/opt/mcp/repos/{team}","scope":"all","language":"auto"}'
+  → 产出: {项目}/test-reports/SECURITY_SCAN_REPORT_CENTRALIZED.md
+```
+
+---
 
 ## 知识库（14源，每天自动更新）
 
 ```
-Knowledge Base: ~/.openclaw/security-kb/
-  attack-matrix-{DATE}.json  — 最新威胁快照 (JSON)
-  attack-matrix-{DATE}.md    — 最新威胁快照 (Markdown)
+~/.openclaw/security-kb/
+  attack-matrix-{DATE}.md  — 最新威胁快照
 ```
 
 cron: `0 6 * * * {SKILL_DIR}/scripts/update-security-kb.sh`
@@ -84,6 +156,7 @@ cron: `0 6 * * * {SKILL_DIR}/scripts/update-security-kb.sh`
 | 14源详情 | `references/attack-sources.md` | 情报源清单 |
 | OWASP 工具覆盖 | `references/owasp-mapping.md` | ~80% 覆盖映射 |
 | 工具安装命令 | `references/tool-install.md` | 20+ 工具安装 |
+| Spawn 模板 | `templates/` | 合约/中心化 spawn 指令 |
 
 ## 严重度标准 (Immunefi + OWASP)
 
