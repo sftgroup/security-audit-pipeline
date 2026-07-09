@@ -1,221 +1,88 @@
-# Security Audit Pipeline — 安全审计流水线
+# Security Audit Pipeline (v3.0)
 
-> 一个 Skill + 一个 MCP Server，Agent 只需调 3 个入口工具即可完成全量安全审计。
+三层 AI Agent 安全审计流水线 — 合约 (contract_audit) / 中心化 (centralized_audit) / 上线后 (production_audit)。**3 个安全子代理，46 个 MCP 工具，24+ 扫描引擎，零安装。**
 
----
+## 快速接入
 
-## 这是什么
-
-一套标准化的 **Skill + Tool + MCP** 安全审计产品，覆盖三类场景：
-
-- 🔷 **智能合约** — Solidity/Foundry 项目安全审计
-- 🏢 **中心化应用** — Node.js/React/Python/Go 项目安全审计
-- 🌐 **生产环境** — 已上线 Web 应用 + 移动 App + API + 基础设施
-
-Agent 加载 Skill 后通过 MCP 协议调用入口工具，无需安装任何扫描软件。所有扫描工具（Slither/Nuclei/sqlmap/MobSF 等 36+ 种）预装在测试服务器上。
-
----
-
-## 怎么用（Agent 视角）
-
-### Step 1: 判断项目类型 → 选入口工具
-
-| 项目特征 | 调用 |
-|----------|------|
-| 有 `contracts/src/*.sol` + `foundry.toml` | `contract_audit` |
-| Node.js/React/Python/Go 没有合约文件 | `centralized_audit` |
-| 已经上线，有 URL / APK | 上面 + `production_audit` |
-
-### Step 2: 调 MCP 工具
-
-```json
-// 合约审计
-contract_audit({
-  "project_path": "/path/to/project",
-  "scope": "all"
-})
-
-// 中心化应用审计
-centralized_audit({
-  "project_path": "/path/to/project",
-  "target_url": "https://app.example.com",
-  "scope": "all"
-})
-
-// 上线后安全检测
-production_audit({
-  "target_url": "https://app.example.com",
-  "domain": "all",
-  "apk_path": "/tmp/app.apk"
-})
+```bash
+git clone https://github.com/sftgroup/agent.git /tmp/agent-skills
+openclaw skills install /tmp/agent-skills/skills/security-audit-pipeline
+openclaw mcp add security-tools --url http://43.156.46.187:3000/sse --transport sse --timeout 300
+openclaw gateway restart
 ```
 
-### Step 3: 读返回 → 修 → 回归
+## 3 个入口工具（子代理直接调）
 
-每个工具返回归一化报告：
+| 入口 | 调用方式 | 覆盖 |
+|------|---------|------|
+| `contract_audit` | `security-tools__contract_audit({"project_path":"...","scope":"full"})` | forge build+test+slither+aderyn+mythril+echidna+semgrep+solhint+gitleaks+npm audit |
+| `centralized_audit` | `security-tools__centralized_audit({"project_path":"...","scope":"all","language":"auto"})` | SAST+DAST+SCA+Infra+Compliance |
+| `production_audit` | `security-tools__production_audit({"target_url":"..."})` | 24 项上线后安全检测 |
+
+## 3 个安全子代理
+
+| 子代理 | MCP 入口 | 模型 | 产出 |
+|--------|---------|------|------|
+| security | `security-tools__contract_audit()` | **zhipu/glm-5.2** (128K) | SECURITY_REVIEW_REPORT.md |
+| security-check | `security-tools__contract_audit()` | deepseek-v4-pro | SECURITY_SCAN_REPORT.md |
+| security-check-centralized | `security-tools__centralized_audit()` | deepseek-v4-pro | SECURITY_SCAN_REPORT_CENTRALIZED.md |
+
+> ⚠️ security 必须用 GLM-5.2！SCSVS 85 项 depth 审计 deepseek 32K 会截断。
+
+## 子代理接入
+
+在 `~/.openclaw/openclaw.json` 里注册：
 
 ```json
 {
-  "sections": {
-    "slither": { "total": 15, "severity": { "High": 3, "Medium": 8 } },
-    "npm_audit": { "critical": 2, "high": 5 },
-    ...
-  },
-  "summary": {
-    "risk_level": "HIGH",
-    "critical": 2,
-    "high": 8,
-    "medium": 10
-  }
+  "agents": { "list": [
+    {"id": "security", "workspace": "workspace/security", "model": "zhipu/glm-5.2"},
+    {"id": "security-check", "workspace": "workspace/security-check", "model": "deepseek/deepseek-v4-pro"},
+    {"id": "security-check-centralized", "workspace": "workspace/security-check-centralized", "model": "deepseek/deepseek-v4-pro"}
+  ]}
 }
 ```
 
----
+复制 AGENTS.md：
 
-## 架构
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                 security-audit-pipeline                  │
-│                                                         │
-│  SKILL.md          ← Agent 加载，知道怎么用              │
-│  assets/           ← 代码模板 (Echidna ×3, Slither ×5)  │
-│  references/       ← 参考文档 (SCSVS, OWASP, 情报源)     │
-│  templates/        ← spawn 模板                         │
-│                                                         │
-│  ┌─── MCP Server ───────────────────────────────────┐   │
-│  │  3 个入口工具 (Agent 调这 3 个)                    │   │
-│  │                                                   │   │
-│  │  contract_audit      → 16 个子工具自动编排         │   │
-│  │  centralized_audit   → 20 个子工具自动编排         │   │
-│  │  production_audit    → 5 个域自动编排              │   │
-│  └───────────────────────────────────────────────────┘   │
-│                                                         │
-│  ┌─── 知识库 ───────────────────────────────────────┐   │
-│  │  cron 每天 06:00 → 14 源自动更新                  │   │
-│  │  ~/.openclaw/security-kb/                         │   │
-│  └───────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────┘
+```bash
+mkdir -p ~/.openclaw/workspace/security ~/.openclaw/workspace/security-check ~/.openclaw/workspace/security-check-centralized
+cp /tmp/agent-skills/agents/security/AGENTS.md ~/.openclaw/workspace/security/
+cp /tmp/agent-skills/agents/security-check/AGENTS.md ~/.openclaw/workspace/security-check/
+cp /tmp/agent-skills/agents/security-check-centralized/AGENTS.md ~/.openclaw/workspace/security-check-centralized/
 ```
 
 ---
+
+## 文档
+
+| 文档 | 内容 |
+|------|------|
+| [QUICKSTART.md](QUICKSTART.md) | 7 步接入指南（含排错） |
+| [SKILL.md](SKILL.md) | Skill 规范（OpenClaw 可读） |
+| [ONBOARDING.md](docs/ONBOARDING.md) | 完整接入流程 |
+| [SCSVS 85项矩阵](references/scsvs-matrix-v2.md) | 完整检查表 |
+| [14源情报详情](references/attack-sources.md) | 威胁情报源 |
+| [工具安装](references/tool-install.md) | MCP 服务器端工具安装 |
 
 ## 目录结构
 
 ```
 security-audit-pipeline/
-│
-├── SKILL.md                        # Skill 入口文档
-│
-├── assets/                         # 安全扫描资产（子 Agent 按需读取）
-│   ├── echidna-harnesses/          # 3 套 Fuzzing 模板 (.sol)
-│   ├── slither-detectors/          # 5 个自定义检测器 (.py)
-│   └── nuclei-templates/           # 5 个 OWASP DAST 模板 (.yaml)
-│
-├── mcp/security-tools-server/      # MCP Server（部署在测试服务器）
-│   ├── server.py                   # Stdio 入口
-│   ├── install.sh                  # 36 工具一键安装
-│   ├── tools/
-│   │   ├── contract.py             # 合约审计（1 入口 + 16 原子）
-│   │   ├── centralized.py          # 中心化审计（1 入口 + 20 原子）
-│   │   ├── production.py           # 生产安全审计（1 入口 + 全自动编排）
-│   │   ├── intel.py                # 威胁情报查询（6 工具）
-│   │   └── shared.py               # 共享工具函数
-│   └── requirements.txt
-│
-├── scripts/
-│   └── update-security-kb.sh       # 14 源 → 本地知识库
-│
-├── references/                     # 参考文档
-│   ├── scsvs-matrix-v2.md          # 85 项 SCSVS 检查表
-│   ├── attack-sources.md           # 14 个威胁情报源详情
-│   ├── owasp-mapping.md            # OWASP Top 10 工具覆盖
-│   └── tool-install.md             # 20+ 工具安装命令
-│
-└── templates/                      # Spawn 模板
-    ├── contract-spawn.md
-    └── centralized-spawn.md
+├── SKILL.md              # Skill 规范
+├── QUICKSTART.md         # 接入指南
+├── README.md             # 本文件
+├── assets/               # 审计资产
+│   ├── echidna-harnesses/  # 3 套 Fuzzing 模板
+│   ├── slither-detectors/  # 5 个自定义检测器
+│   └── nuclei-templates/   # 5 个 DAST 模板
+├── mcp/                    # MCP Server 源码
+│   └── security-tools-server/
+├── references/             # 参考文档
+├── scripts/                # 工具脚本
+└── templates/              # Spawn 模板
 ```
 
----
+## 维护者
 
-## 三个入口工具覆盖
-
-### contract_audit
-
-```
-编译 → 测试 → 静态分析 → Fuzzing → 密钥泄露 → 依赖漏洞
-forge   forge   slither     echidna    grep        npm
-                aderyn
-                mythril
-                semgrep
-                solhint
-```
-
-### centralized_audit
-
-```
-SAST              DAST         SCA          基础设施     合规
-semgrep           nuclei       npm audit     nmap        testssl
-bandit (Python)   ZAP          pip-audit     lynis       CORS 检查
-gosec (Go)        nikto        cargo audit   docker-bench   Headers
-eslint (JS)       ffuf         trivy         kube-bench     WhatWeb
-gitleaks
-```
-
-### production_audit
-
-```
-Web                          API               移动
-sqlmap (SQL注入)             CORS 检查         APK 分析
-XSSer (XSS)                  Headers 检查      硬编码密钥
-Wapiti (全量Web扫描)          SSL 评级         MobSF
-wfuzz (目录爆破)              Cookie 审计
-子域名枚举                   JWT 检查
-                             Rate Limit 测试
-基础设施                    合规
-nmap (端口扫描)              OWASP ZAP Baseline
-SSH 加固
-WhatWeb (指纹)
-```
-
----
-
-## 严重度标准
-
-| 级别 | 合约 (Immunefi) | 中心化/生产 (OWASP) |
-|------|-------------------|-----------------------|
-| 🔴 Critical | ≥$100K 损失 | RCE, 数据泄露 |
-| 🟠 High | 单点突破 | XSS/SSRF/认证绕过 |
-| 🟡 Medium | 条件组合利用 | 配置不当, 信息泄露 |
-| 🟢 Low | 最佳实践 | Headers, Cookie 配置 |
-
----
-
-## 部署
-
-```bash
-# 1. 安装 MCP Server 上的 36 个工具
-sudo bash mcp/security-tools-server/install.sh
-
-# 2. 启动 MCP Server (Stdio)
-python3 mcp/security-tools-server/server.py
-
-# 3. 设置知识库自动更新
-crontab -e
-# 添加: 0 6 * * * /path/to/scripts/update-security-kb.sh
-```
-
----
-
-## 文件统计
-
-| 组件 | 数量 |
-|------|:--:|
-| 总文件 | 30 |
-| MCP 工具 | 3 入口 + 43 原子 + 6 情报 = 52 |
-| Python 代码 | ~2,800 行 |
-| Echidna Harness | 3 套 |
-| Slither Detector | 5 个 |
-| Nuclei 模板 | 5 个 |
-| 威胁情报源 | 14 个 |
+Wayne (stevenwang) — Team2
